@@ -1,0 +1,90 @@
+# =============================================================================
+# PYTHON
+# =============================================================================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# =============================================================================
+# PROJECT — DATA & OUTPUTS
+# =============================================================================
+
+# Audio files (can be large)
+inputs/
+!inputs/.gitkeep
+
+# All generated outputs
+outputs/
+!outputs/.gitkeep
+
+# Model weight offload folder (created at runtime by HuggingFace)
+offload/
+
+# Intermediate transcript files if generated at root level
+transcript_raw.json
+transcript_translated.json
+combined.wav
+
+# =============================================================================
+# MODELS & CACHE
+# =============================================================================
+
+# HuggingFace model cache
+.cache/
+~/.cache/huggingface/
+
+# Torch cache
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# =============================================================================
+# ENVIRONMENT & SECRETS
+# =============================================================================
+.env
+# keep the example template
+!.env.example
+
+# =============================================================================
+# JUPYTER / COLAB ARTIFACTS
+# =============================================================================
+.ipynb_checkpoints/
+*.ipynb
+
+# =============================================================================
+# IDE & OS
+# =============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# =============================================================================
+# LOGS
+# =============================================================================
+*.log
+logs/
