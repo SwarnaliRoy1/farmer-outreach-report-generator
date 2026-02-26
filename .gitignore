@@ -31,8 +31,8 @@ ENV/
 # =============================================================================
 
 # Audio files (can be large)
-inputs/
-!inputs/.gitkeep
+# inputs/
+# !inputs/.gitkeep
 
 # All generated outputs
 outputs/
