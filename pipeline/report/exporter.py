@@ -1,4 +1,6 @@
 """
+pipeline/report/exporter.py
+
 Generates a formatted PDF report from the assembled report dict.
 
 Expected report dict shape (from pipeline/report/assembler.py):
@@ -456,7 +458,7 @@ class PDFReportGenerator:
             narration_content.append(
                 Paragraph(_escape_for_para(strip_markdown(summary_text)), body_style)
             )
-        story.append(self._boxed_body(narration_content))
+        story.append(self._boxed_body_splittable(narration_content))
         story.append(Spacer(1, 0.2 * inch))
 
         # ── Key Challenges ───────────────────────────────────────────────────
@@ -594,7 +596,7 @@ class PDFReportGenerator:
         conclusion = safe(data.get("conclusion", "")) or summary_text
         if conclusion:
             story.append(self._boxed_header("Conclusion"))
-            story.append(self._boxed_body([
+            story.append(self._boxed_body_splittable([
                 Paragraph(_escape_for_para(strip_markdown(conclusion)), body_style)
             ]))
 
