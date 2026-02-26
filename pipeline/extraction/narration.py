@@ -93,9 +93,7 @@ Transcript:
 """,
             },
         ]
-        return self._run_inference(
-            messages, max_new_tokens=600, do_sample=True, temperature=0.3, top_p=0.9
-        ).strip()
+        return self._run_inference(messages, max_new_tokens=600).strip()
 
 
 # =============================================================================
