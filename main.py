@@ -1,4 +1,6 @@
 """
+main.py
+
 Single entry point for the full outreach report pipeline:
 
   audio files (directory)
@@ -234,7 +236,8 @@ async def pipeline(args):
         insights     = extracted["insights"],
         participants = extracted["participants"],
     )
-    save(report, args.output_dir)
+    export_pdf = not args.no_pdf
+    save(report, args.output_dir, export_pdf=export_pdf)
 
     log.info("══ Pipeline complete ══")
     log.info(f"  Segments processed : {len(entries)}")
@@ -242,6 +245,8 @@ async def pipeline(args):
     log.info(f"  Farmer questions   : {len(extracted['insights'].get('farmer_questions', []))}")
     log.info(f"  Participants       : {extracted['participants'].get('total_count', 0)}")
     log.info(f"  Outputs saved to   : {args.output_dir}")
+    if export_pdf:
+        log.info(f"  PDF report         : {args.output_dir}/outreach_report.pdf")
 
 
 # =============================================================================
@@ -275,6 +280,10 @@ def parse_args():
     parser.add_argument(
         "--skip_translation", action="store_true",
         help="Skip translation — reuse existing transcript_translated.json"
+    )
+    parser.add_argument(
+        "--no_pdf", action="store_true",
+        help="Skip PDF generation — save JSON outputs only"
     )
     return parser.parse_args()
 
