@@ -25,11 +25,8 @@ class BaseLLM:
         self.tokenizer = MistralCommonBackend.from_pretrained(MODEL_ID)
         self.model = Mistral3ForConditionalGeneration.from_pretrained(
             MODEL_ID,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-            offload_folder="offload",
-            offload_state_dict=True,
-        )
+            dtype=torch.bfloat16,
+        ).to(self.device)
         self.model.eval()
         log.info("Model loaded successfully.")
 
@@ -40,10 +37,7 @@ class BaseLLM:
     def _run_inference(
         self,
         messages: List[Dict],
-        max_new_tokens: int = 800,
-        do_sample: bool = False,
-        temperature: float = 0.0,
-        top_p: float = 1.0,
+        max_new_tokens: int = 800
     ) -> str:
         """Tokenize messages, generate, and return only the new decoded tokens."""
         tokenized = self.tokenizer.apply_chat_template(
@@ -57,10 +51,7 @@ class BaseLLM:
         with torch.no_grad():
             output = self.model.generate(
                 **tokenized,
-                max_new_tokens=max_new_tokens,
-                do_sample=do_sample,
-                temperature=temperature if do_sample else None,
-                top_p=top_p if do_sample else None,
+                max_new_tokens=max_new_tokens
             )
 
         return self.tokenizer.decode(

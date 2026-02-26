@@ -28,6 +28,12 @@ import asyncio
 import logging
 import os
 
+from dotenv import load_dotenv
+
+# Load .env before any pipeline module is imported so all os.getenv() calls
+# across the codebase see the variables without needing their own load_dotenv()
+load_dotenv()
+
 import torch
 
 logging.basicConfig(

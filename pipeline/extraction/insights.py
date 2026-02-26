@@ -138,6 +138,6 @@ Return STRICT JSON:
 """,
             },
         ]
-        decoded = self._run_inference(messages, max_new_tokens=600)
+        decoded = self._run_inference(messages, max_new_tokens=2500)
         result  = self._safe_json(decoded, {"challenges": []})
         return result.get("challenges", [])
