@@ -118,24 +118,44 @@ def coerce_list(val: Any) -> List:
 
 def participants_to_df(participants: Any) -> pd.DataFrame:
     """
-    Convert our participants dict (with detailed_participants) to a DataFrame.
-    Falls back gracefully if the shape is unexpected.
+    Convert participants output to a DataFrame.
+
+    Supported shapes:
+      - New farmer-only shape:
+          {"total_count": int, "farmers": [ {...}, ... ]}
+      - Old role-based shape:
+          {"detailed_participants": [ {...}, ... ], "total_count": int, ...}
+      - A plain list of dicts
     """
     if participants is None:
         return pd.DataFrame()
 
-    # Our shape: {"detailed_participants": [...], "total_count": ..., ...}
+    rows: Any = None
+
     if isinstance(participants, dict):
-        rows = participants.get("detailed_participants", [])
+        if isinstance(participants.get("farmers"), list):
+            rows = participants.get("farmers", [])
+        elif isinstance(participants.get("detailed_participants"), list):
+            rows = participants.get("detailed_participants", [])
+        elif isinstance(participants.get("participants"), list):
+            rows = participants.get("participants", [])
+        else:
+            rows = []
     elif isinstance(participants, list):
         rows = participants
     else:
-        return pd.DataFrame()
+        rows = []
 
     if not rows:
         return pd.DataFrame()
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+
+    # Be defensive about column names
+    if "total_land_acre" in df.columns and "total_land_acres" not in df.columns:
+        df = df.rename(columns={"total_land_acre": "total_land_acres"})
+
+    return df
 
 
 def flatten_challenges(challenges: List[Dict]) -> List[str]:
@@ -526,12 +546,14 @@ class PDFReportGenerator:
         story.append(Paragraph("Participants Details", styles["Heading2"]))
         story.append(Spacer(1, 6))
 
-        wanted_cols  = ["name", "role", "village", "phone_number"]
+        wanted_cols  = ["name", "phone_number", "total_land_acres", "qualification", "animals", "main_crops", "notes"]
         present_cols = [c for c in wanted_cols if c in participants_df.columns]
-
+        
         if participants_df.empty or not present_cols:
-            story.append(Paragraph("No participant details available.", body_style))
+            story.append(Paragraph("No farmer participant details available.", body_style))
         else:
+            present_cols = [c for c in wanted_cols if c in participants_df.columns]
+        
             cell_style = ParagraphStyle(
                 "CellP",
                 parent=styles["BodyText"],
@@ -547,29 +569,93 @@ class PDFReportGenerator:
                 parent=cell_style,
                 fontName=self.header_font,
             )
-
-            p_data = [
-                [Paragraph(_escape_for_para(c), hdr_style) for c in present_cols]
-            ]
-            for _, row in participants_df[present_cols].iterrows():
-                p_data.append([
-                    Paragraph(
-                        _escape_for_para(
-                            "" if pd.isna(row[c]) else
-                            ("" if str(row[c]).lower() == "none" else
-                             str(row[c]).replace("\n", " ").strip())
-                        ),
-                        cell_style,
+        
+            def _fmt_cell(v: Any) -> str:
+                if v is None:
+                    return ""
+                try:
+                    if pd.isna(v):
+                        return ""
+                except Exception:
+                    pass
+                s = str(v).replace("\n", " ").strip()
+                if s.lower() in ("none", "null", "nan"):
+                    return ""
+                return s
+        
+            p_data = [[Paragraph(_escape_for_para(c), hdr_style) for c in present_cols]]
+        
+            # Sort by ordinal if possible
+            df_show = participants_df.copy()
+            if "ordinal" in df_show.columns:
+                try:
+                    df_show["_ord_int"] = df_show["ordinal"].apply(
+                        lambda x: int(re.search(r"[0-9]+", str(x)).group(0)) if re.search(r"[0-9]+", str(x)) else 10**9
                     )
+                    df_show = df_show.sort_values("_ord_int")
+                except Exception:
+                    pass
+        
+            for _, row in df_show[present_cols].iterrows():
+                p_data.append([
+                    Paragraph(_escape_for_para(_fmt_cell(row.get(c))), cell_style)
                     for c in present_cols
                 ])
-
+        
             col_widths_map = {
-                "name":         120,
-                "role":         100,
-                "village":       90,
-                "phone_number":  80,
+                "name":             110,
+                "phone_number":      75,
+                "total_land_acres":  55,
+                "qualification":     55,
+                "animals":           75,
+                "main_crops":       110,
+                "notes":            120,
             }
+        
+        # wanted_cols  = ["name", "role", "village", "phone_number"]
+        # present_cols = [c for c in wanted_cols if c in participants_df.columns]
+
+        # if participants_df.empty or not present_cols:
+        #     story.append(Paragraph("No participant details available.", body_style))
+        # else:
+        #     cell_style = ParagraphStyle(
+        #         "CellP",
+        #         parent=styles["BodyText"],
+        #         fontName=self.font,
+        #         fontSize=10,
+        #         leading=12,
+        #         alignment=TA_LEFT,
+        #         spaceBefore=0,
+        #         spaceAfter=0,
+        #     )
+        #     hdr_style = ParagraphStyle(
+        #         "HeaderCellP",
+        #         parent=cell_style,
+        #         fontName=self.header_font,
+        #     )
+
+        #     p_data = [
+        #         [Paragraph(_escape_for_para(c), hdr_style) for c in present_cols]
+        #     ]
+        #     for _, row in participants_df[present_cols].iterrows():
+        #         p_data.append([
+        #             Paragraph(
+        #                 _escape_for_para(
+        #                     "" if pd.isna(row[c]) else
+        #                     ("" if str(row[c]).lower() == "none" else
+        #                      str(row[c]).replace("\n", " ").strip())
+        #                 ),
+        #                 cell_style,
+        #             )
+        #             for c in present_cols
+        #         ])
+
+        #     col_widths_map = {
+        #         "name":         120,
+        #         "role":         100,
+        #         "village":       90,
+        #         "phone_number":  80,
+        #     }
             usable_width = A4[0] - doc.leftMargin - doc.rightMargin
             widths       = [col_widths_map.get(c, 80) for c in present_cols]
             total_w      = sum(widths)
