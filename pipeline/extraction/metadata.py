@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pipeline.extraction.base_llm import BaseLLM
@@ -69,6 +70,16 @@ def normalize_text(t: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
+def weekday_from_date(date_str: Optional[str]) -> Optional[str]:
+    if not date_str:
+        return None
+    s = str(date_str).strip()
+    # expected "YYYY-MM-DD"
+    try:
+        dt = datetime.strptime(s, "%Y-%m-%d")
+        return dt.strftime("%A")
+    except Exception:
+        return None
 
 def pick_relevant_window(text: str, window: int = 7000) -> str:
     """
@@ -278,19 +289,55 @@ def postprocess_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
     # phone
     m["phone_number"] = normalize_phone(m.get("phone_number"))
 
-    # counts -> int
-    for k in ("farmers_attended_total", "female_farmers_count", "male_farmers_count"):
-        if m.get(k) is None:
-            continue
-        try:
-            m[k] = int(str(m[k]).strip())
-        except Exception:
-            m[k] = to_int_maybe(m[k])
+    # # counts -> int
+    # for k in ("farmers_attended_total", "female_farmers_count", "male_farmers_count"):
+    #     if m.get(k) is None:
+    #         continue
+    #     try:
+    #         m[k] = int(str(m[k]).strip())
+    #     except Exception:
+    #         m[k] = to_int_maybe(m[k])
+
+    # ------------------------------------------------------------------
+    # CONSISTENCY FIX FOR FARMER COUNTS
+    # ------------------------------------------------------------------
+    
+    total = m.get("farmers_attended_total")
+    male = m.get("male_farmers_count")
+    female = m.get("female_farmers_count")
+    
+    # Ensure ints or None
+    total = int(total) if isinstance(total, int) else total
+    male = int(male) if isinstance(male, int) else male
+    female = int(female) if isinstance(female, int) else female
+    
+    # Case 1: total + male known → derive female
+    if total is not None and male is not None:
+        derived = max(total - male, 0)
+        if female is None:
+            m["female_farmers_count"] = derived
+    
+    # Case 2: total + female known → derive male
+    elif total is not None and female is not None:
+        derived = max(total - female, 0)
+        if male is None:
+            m["male_farmers_count"] = derived
+    
+    # Case 3: female still None → default to 0
+    if m.get("female_farmers_count") is None:
+        m["female_farmers_count"] = 0
+    
+    # Case 4: male still None but total exists → assume all male
+    if m.get("male_farmers_count") is None and total is not None:
+        m["male_farmers_count"] = total
 
     # times
     m["event_start_time"] = normalize_time(m.get("event_start_time"))
     m["event_end_time"] = normalize_time(m.get("event_end_time"))
 
+    # If day missing but date present, compute it
+    if not m.get("day") and m.get("date"):
+        m["day"] = weekday_from_date(m["date"])
     # day capitalization
     if m.get("day"):
         m["day"] = clean_value(m["day"]).capitalize()
@@ -323,8 +370,12 @@ def extract_meta_regex(text: str) -> Dict[str, Any]:
     ], text))
 
     # day
+    # out["day"] = clean_value(first_match([
+    #     rf"(?:\bday\b\s*(?:is)?\s*)([A-Za-z]+){STOP}",
+    # ], text))
     out["day"] = clean_value(first_match([
         rf"(?:\bday\b\s*(?:is)?\s*)([A-Za-z]+){STOP}",
+        rf"(?:\btoday\b\s*(?:is)?\s*)(monday|tuesday|wednesday|thursday|friday|saturday|sunday){STOP}",
     ], text))
 
     # village / panchayat / block
@@ -338,8 +389,17 @@ def extract_meta_regex(text: str) -> Dict[str, Any]:
         rf"(?:\bpanchayat\b\s*)(.*?){STOP}",
     ], text))
 
+    # out["block"] = clean_value(first_match([
+    #     rf"(?:\bblock\b\s*(?:is)?\s*)(.*?){STOP}",
+    # ], text))
+    # out["block"] = out["block"] or clean_value(first_match([
+    #     rf"(?:\bblock\b\s*)([A-Za-z][A-Za-z\s]+?){STOP}",
+    # ], text))
+    # Block (IndicTrans2 often gives: "Block Shri Chamkaur Sahib Coordinator ...")
     out["block"] = clean_value(first_match([
-        rf"(?:\bblock\b\s*(?:is)?\s*)(.*?){STOP}",
+        rf"\bblock\b\s*(?:name\s*)?(?:is\s*)?([A-Za-z][A-Za-z\s]+?){STOP}",
+        rf"\bblock\b\s*[:\-]?\s*([A-Za-z][A-Za-z\s]+?){STOP}",
+        rf"\bblok\b\s*(?:nem|name)?\s*(?:is\s*)?([A-Za-z][A-Za-z\s]+?){STOP}",  # "Blok Nem"
     ], text))
 
     # names
