@@ -1,9 +1,14 @@
 """
-Regex-first metadata extraction with optional LLM backfill (Ministral via BaseLLM).
+Regex-first metadata extraction with optional LLM backfill (via BaseLLM).
 
-- First pass: deterministic regex extraction.
+Design:
+- First pass: deterministic regex extraction (fast, stable).
 - Second pass (optional): LLM fills ONLY missing keys; never overwrites regex hits.
-- Uses BaseLLM helpers: _run_inference + _safe_json.
+- Final pass: strong post-processing to remove markdown/noise and to split
+  combined clauses like:
+    "under **Gardi Pharid Panchayat** in **Shri Chamkaur Sahib Block**"
+
+This module is tuned for translated English transcripts produced by Ajsal's pipeline
 """
 
 from __future__ import annotations
@@ -17,9 +22,8 @@ from pipeline.extraction.base_llm import BaseLLM
 
 log = logging.getLogger(__name__)
 
-
 # =============================================================================
-# CONSTANTS
+# SCHEMA
 # =============================================================================
 
 SCHEMA: Dict[str, Any] = {
@@ -49,12 +53,15 @@ NUMWORDS = {
     "nineteen": 19, "twenty": 20,
 }
 
+HONORIFICS_RE = re.compile(r"^\s*(shri|smt|mr|mrs|ms|miss|dr)\.?\s+", re.I)
+
 
 # =============================================================================
-# HELPERS (regex-first)
+# TEXT HELPERS
 # =============================================================================
 
 def normalize_text(t: str) -> str:
+    t = (t or "")
     t = t.replace("\u2019", "'").replace("\u2018", "'")
     t = t.replace("\u201c", '"').replace("\u201d", '"')
     t = t.replace("\\ u", "\\u")               # fix broken escapes
@@ -64,25 +71,41 @@ def normalize_text(t: str) -> str:
 
 
 def pick_relevant_window(text: str, window: int = 7000) -> str:
-    text_n = text.lower()
+    """
+    Metadata typically appears early in your narration.
+    We pick a window around the first occurrence of any key phrase.
+    """
+    t = (text or "")
+    tn = t.lower()
     keys = [
-        "today", "date", "village", "panchayat", "block",
+        "today", "date", "day",
+        "village", "panchayat", "block", "district",
         "coordinator", "reporting manager", "sarpanch",
-        "phone", "farmer", "farmers", "event start", "event end", "day",
+        "phone",
+        "event start", "event end", "meeting location", "event location",
+        "farmers", "male farmers", "female farmers", "total farmers",
     ]
-    idxs = [text_n.find(k) for k in keys if text_n.find(k) != -1]
+    idxs = [tn.find(k) for k in keys if tn.find(k) != -1]
     if not idxs:
-        return text[:window]
+        return t[:window]
     i = max(min(idxs) - window // 2, 0)
-    return text[i:i + window]
+    return t[i:i + window]
 
 
 def first_match(patterns: List[str], text: str, flags=re.I) -> Optional[str]:
     for p in patterns:
         m = re.search(p, text, flags)
         if m:
-            return m.group(1).strip()
+            return (m.group(1) or "").strip()
     return None
+
+
+def clean_value(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    s = str(v).strip()
+    s = re.sub(r"[,\.;:\-]+$", "", s).strip()
+    return s if s else None
 
 
 def to_int_maybe(x: Any) -> Optional[int]:
@@ -94,96 +117,283 @@ def to_int_maybe(x: Any) -> Optional[int]:
     return NUMWORDS.get(s)
 
 
-def clean_value(v: Any) -> Optional[str]:
-    if v is None:
-        return None
-    v = str(v).strip()
-    v = re.sub(r"[,\.;:\-]+$", "", v).strip()
-    return v if v else None
+# =============================================================================
+# SANITIZERS (markdown/noise, people, places, time)
+# =============================================================================
 
+def strip_markdown(s: str) -> str:
+    s = (s or "")
+    s = re.sub(r"\*\*", "", s)   # **bold**
+    s = re.sub(r"__", "", s)     # __underline__
+    s = s.replace("`", "")       # `code`
+    return s
+
+
+def clean_place(s: Any) -> Optional[str]:
+    if s is None:
+        return None
+    s = strip_markdown(str(s))
+    s = normalize_text(s)
+    s = s.strip(" ,.;:-")
+    if not s or s in ("*", "**"):
+        return None
+    # remove leading glue words
+    s = re.sub(r"^(under|in|at)\s+", "", s, flags=re.I).strip()
+    return s or None
+
+
+def clean_person_name(s: Any, drop_honorifics: bool = True) -> Optional[str]:
+    if s is None:
+        return None
+    s = strip_markdown(str(s))
+    s = normalize_text(s).strip(" ,.;:-")
+    if not s:
+        return None
+    if drop_honorifics:
+        s = HONORIFICS_RE.sub("", s).strip()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s or None
+
+
+def normalize_phone(s: Any) -> Optional[str]:
+    if s is None:
+        return None
+    digits = re.sub(r"\D", "", str(s))
+    if len(digits) >= 10:
+        return digits[-10:]
+    return None
+
+
+def normalize_time(t: Any) -> Optional[str]:
+    """
+    Convert formats like:
+      "11AM", "11:00AM", "11:00 AM", "1PM", "01:00 pm"
+    to:
+      "11:00 AM", "01:00 PM"
+    """
+    if t is None:
+        return None
+    s = strip_markdown(str(t))
+    s = normalize_text(s).upper().replace(" ", "")
+    if not s:
+        return None
+
+    m = re.match(r"^(\d{1,2})(?::?(\d{2}))?(AM|PM)$", s)
+    if not m:
+        return clean_value(t)
+
+    hh = int(m.group(1))
+    mm = int(m.group(2) or "00")
+    ap = m.group(3)
+    return f"{hh:02d}:{mm:02d} {ap}"
+
+
+def _split_combined_places(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Fix combined clauses often produced by LLM or run-on transcript:
+      village: "under Gardi Pharid Panchayat in Shri Chamkaur Sahib Block"
+    """
+    m = dict(meta)
+
+    village = m.get("village")
+    panchayat = m.get("panchayat")
+    block = m.get("block")
+
+    # If village contains "panchayat" or "block", split it.
+    if isinstance(village, str):
+        v = clean_place(village) or ""
+        v2 = re.sub(r"^\s*under\s+", "", v, flags=re.I).strip()
+        vl = v2.lower()
+
+        # Extract block name "... <BLOCK> Block"
+        mb = re.search(r"([A-Za-z][A-Za-z\s]+?)\s+block\b", v2, flags=re.I)
+        if mb and (not block or block in ("*", "**")):
+            m["block"] = mb.group(1).strip()
+
+        # Extract panchayat name "... <PANCHAYAT> Panchayat"
+        mp = re.search(r"([A-Za-z][A-Za-z\s]+?)\s+panchayat\b", v2, flags=re.I)
+        if mp and not panchayat:
+            m["panchayat"] = mp.group(1).strip()
+
+        # Extract village candidate = before "Panchayat" if present
+        if "panchayat" in vl:
+            before_pan = re.split(r"\bpanchayat\b", v2, flags=re.I)[0].strip()
+            before_pan = re.sub(r"^\s*village\s+name\s*(?:is)?\s*", "", before_pan, flags=re.I).strip()
+            if before_pan:
+                m["village"] = before_pan
+
+    # Clean panchayat if it contains "in ... block"
+    if isinstance(m.get("panchayat"), str):
+        p = clean_place(m["panchayat"])
+        if p:
+            p = re.sub(r"\s+in\s+.*?\bblock\b.*$", "", p, flags=re.I).strip()
+            p = re.sub(r"\bpanchayat\b", "", p, flags=re.I).strip()
+            m["panchayat"] = p or None
+        else:
+            m["panchayat"] = None
+
+    # Clean block
+    if isinstance(m.get("block"), str):
+        b = clean_place(m["block"])
+        if b:
+            b = re.sub(r"\bblock\b", "", b, flags=re.I).strip()
+            m["block"] = b or None
+        else:
+            m["block"] = None
+
+    # Event location: remove trailing "village"
+    if isinstance(m.get("event_location"), str):
+        el = clean_place(m["event_location"])
+        if el:
+            el = re.sub(r"\bvillage\b$", "", el, flags=re.I).strip()
+            m["event_location"] = el or None
+        else:
+            m["event_location"] = None
+
+    # if event_location missing, fallback to village
+    if not m.get("event_location") and m.get("village"):
+        m["event_location"] = m["village"]
+
+    return m
+
+
+def postprocess_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Final cleanup step — removes markdown/noise and normalizes types/formatting.
+    """
+    m = dict(meta)
+
+    # places
+    for k in ("village", "panchayat", "block", "district", "event_location"):
+        m[k] = clean_place(m.get(k))
+
+    # split combined clause (critical for your issue)
+    m = _split_combined_places(m)
+
+    # names
+    m["sarpanch_name"] = clean_person_name(m.get("sarpanch_name"), drop_honorifics=True)
+    m["coordinator_name"] = clean_person_name(m.get("coordinator_name"), drop_honorifics=True)
+    m["reporting_manager_name"] = clean_person_name(m.get("reporting_manager_name"), drop_honorifics=True)
+
+    # phone
+    m["phone_number"] = normalize_phone(m.get("phone_number"))
+
+    # counts -> int
+    for k in ("farmers_attended_total", "female_farmers_count", "male_farmers_count"):
+        if m.get(k) is None:
+            continue
+        try:
+            m[k] = int(str(m[k]).strip())
+        except Exception:
+            m[k] = to_int_maybe(m[k])
+
+    # times
+    m["event_start_time"] = normalize_time(m.get("event_start_time"))
+    m["event_end_time"] = normalize_time(m.get("event_end_time"))
+
+    # day capitalization
+    if m.get("day"):
+        m["day"] = clean_value(m["day"]).capitalize()
+
+    # remove junk markers
+    for k, v in list(m.items()):
+        if isinstance(v, str) and v.strip() in ("", "*", "**"):
+            m[k] = None
+
+    return m
+
+
+# =============================================================================
+# REGEX EXTRACTOR
+# =============================================================================
 
 def extract_meta_regex(text: str) -> Dict[str, Any]:
     text = normalize_text(text)
     out = dict(SCHEMA)
 
-    # Stop at comma OR period OR end (prevents bleeding)
-    STOP = r"(?=\s*(?:,|\.|$))"
+    # Stop at comma/period/end OR when the next field label starts
+    STOP = r"(?=\s*(?:,|\.|$|\bvillage\b|\bpanchayat\b|\bblock\b|\bdistrict\b|\bcoordinator\b|\breporting\b|\bsarpanch\b|\bevent\b|\bphone\b))"
 
+    # date
     out["date"] = clean_value(first_match([
-        rf"(?:today'?s\s+date\s*(?:is)?\s*)([^,\.]+){STOP}",
-        rf"(?:\bdate\b\s*)([A-Za-z]+\s+\d{{1,2}},\s*\d{{4}}){STOP}",
+        rf"(?:today'?s\s+date\s*(?:is)?\s*)(.*?){STOP}",
+        rf"(?:\bdate\b\s*)(\d{{4}}-\d{{2}}-\d{{2}}){STOP}",
         rf"(?:\bdate\b\s*)(\d{{1,2}}[\/\-]\d{{1,2}}[\/\-]\d{{2,4}}){STOP}",
+        rf"(?:\bdate\b\s*)([A-Za-z]+\s+\d{{1,2}},\s*\d{{4}}){STOP}",
     ], text))
 
+    # day
     out["day"] = clean_value(first_match([
-        rf"(?:day\s*(?:is)?\s*)([A-Za-z]+){STOP}",
+        rf"(?:\bday\b\s*(?:is)?\s*)([A-Za-z]+){STOP}",
     ], text))
 
+    # village / panchayat / block
     out["village"] = clean_value(first_match([
-        rf"(?:village\s+name\s*(?:is)?\s*)([^,\.]+){STOP}",
-        rf"(?:\bvillage\b\s*)([^,\.]+){STOP}",
+        rf"(?:village\s+name\s*(?:is)?\s*)(.*?){STOP}",
+        rf"(?:\bvillage\b\s*)(.*?){STOP}",
     ], text))
 
     out["panchayat"] = clean_value(first_match([
-        rf"(?:panchayat\s+name\s*(?:is)?\s*)([^,\.]+){STOP}",
-        rf"(?:\bpanchayat\b\s*)([^,\.]+){STOP}",
+        rf"(?:panchayat\s+name\s*(?:is)?\s*)(.*?){STOP}",
+        rf"(?:\bpanchayat\b\s*)(.*?){STOP}",
     ], text))
 
     out["block"] = clean_value(first_match([
-        rf"(?:block\s*(?:is)?\s*)([^,\.]+){STOP}",
+        rf"(?:\bblock\b\s*(?:is)?\s*)(.*?){STOP}",
     ], text))
 
+    # names
     out["coordinator_name"] = clean_value(first_match([
-        rf"(?:coordinator\s+name\s*(?:is)?\s*)([^,\.]+){STOP}",
-        rf"(?:name\s+of\s+the\s+coordinator\s*)([^,\.]+){STOP}",
+        rf"(?:coordinator\s+name\s*(?:is)?\s*)(.*?){STOP}",
+        rf"(?:name\s+of\s+the\s+coordinator\s*)(.*?){STOP}",
     ], text))
 
     out["reporting_manager_name"] = clean_value(first_match([
-        rf"(?:reporting\s+manager\s*(?:name)?\s*(?:is)?\s*)([^,\.]+){STOP}",
-        rf"(?:name\s+of\s+the\s+reporting\s+manager\s*)([^,\.]+){STOP}",
+        rf"(?:reporting\s+manager\s*(?:name)?\s*(?:is)?\s*)(.*?){STOP}",
+        rf"(?:name\s+of\s+the\s+reporting\s+manager\s*)(.*?){STOP}",
     ], text))
 
     out["sarpanch_name"] = clean_value(first_match([
-        rf"(?:sarpanch\s+name\s*(?:is)?\s*)([^,\.]+){STOP}",
+        rf"(?:sarpanch\s+name\s*(?:is)?\s*)(.*?){STOP}",
+        rf"(?:name\s+of\s+the\s+sarpanch\s*)(.*?){STOP}",
     ], text))
 
+    # location
     out["event_location"] = clean_value(first_match([
-        rf"(?:meeting\s+location\s*)([^,\.]+){STOP}",
-        rf"(?:event\s+location\s*)([^,\.]+){STOP}",
+        rf"(?:meeting\s+location\s*)(.*?){STOP}",
+        rf"(?:event\s+location\s*)(.*?){STOP}",
     ], text))
 
+    # district
     out["district"] = clean_value(first_match([
-        rf"(?:district\s*)([^,\.]+){STOP}",
+        rf"(?:\bdistrict\b\s*)(.*?){STOP}",
     ], text))
 
-    # Phone: digits or spaced digits
+    # phone
     phone_raw = first_match([
         r"(?:phone\s+number\s*(?:is)?\s*)(\+?\d[\d\s]{8,}\d)",
+        r"(?:\bphone\b\s*(?:no|number)?\s*(?:is|:)?\s*)(\+?\d[\d\s]{8,}\d)",
     ], text)
-    if phone_raw:
-        digits = re.sub(r"\D", "", phone_raw)
-        if len(digits) >= 10:
-            out["phone_number"] = digits[-10:]
+    out["phone_number"] = normalize_phone(phone_raw)
 
-    # Total farmers
+    # total farmers
     tf = first_match([
         r"number\s+of\s+total\s+farmers\s*\.\s*([A-Za-z]+|\d+)",
         r"number\s+of\s+total\s+farmers\s*[:\-]?\s*([A-Za-z]+|\d+)",
         r"\btotal\s+farmers\b\s*[:\-]?\s*([A-Za-z]+|\d+)",
+        r"\bno\s+of\s+farmers\s+attended\b\s*[:\-]?\s*([A-Za-z]+|\d+)",
     ], text)
-    tf_int = to_int_maybe(tf)
-    if tf_int is not None:
-        out["farmers_attended_total"] = str(tf_int)
+    out["farmers_attended_total"] = to_int_maybe(tf)
 
-    # Female/male farmers
+    # female / male farmers
     female_raw = first_match([r"female\s+farmers\s*,?\s*(nil|none|\d+|[A-Za-z]+)"], text)
     male_raw   = first_match([r"male\s+farmers\s*,?\s*(nil|none|\d+|[A-Za-z]+)"], text)
 
     f_int = to_int_maybe(female_raw)
     m_int = to_int_maybe(male_raw)
 
-    # Special-case: "male farmers, nil ... , eight" => choose last numeric token in the clause
-    m_clause = re.search(r"male\s+farmers([^\.]{0,60})", text, re.I)
+    # Special-case: "male farmers, nil ... eight" -> choose last numeric token
+    m_clause = re.search(r"male\s+farmers([^\.]{0,80})", text, re.I)
     if m_clause:
         tail = m_clause.group(1).lower()
         tokens = re.findall(
@@ -191,26 +401,14 @@ def extract_meta_regex(text: str) -> Dict[str, Any]:
             tail,
         )
         if tokens:
-            last = tokens[-1]
-            last_int = to_int_maybe(last)
-            if (tokens[0] in ("nil", "none", "zero")) and (last_int is not None) and (last_int != 0):
+            last_int = to_int_maybe(tokens[-1])
+            if tokens[0] in ("nil", "none", "zero") and last_int not in (None, 0):
                 m_int = last_int
 
-    if f_int is not None:
-        out["female_farmers_count"] = f_int
-    if m_int is not None:
-        out["male_farmers_count"] = m_int
+    out["female_farmers_count"] = f_int
+    out["male_farmers_count"] = m_int
 
-    # Consistency fix: if total known and female=0, assume all male if male missing/0
-    if out["farmers_attended_total"] is not None and out["female_farmers_count"] == 0:
-        try:
-            tot = int(out["farmers_attended_total"])
-            if out["male_farmers_count"] in (None, 0):
-                out["male_farmers_count"] = tot
-        except Exception:
-            pass
-
-    # Start/end time
+    # start time
     ms = re.search(
         r"(?:event\s+start(?:\s+time)?\s*(?:is)?\s*)(\d{1,2})(?::(\d{2}))?\s*(am|pm)",
         text,
@@ -220,6 +418,7 @@ def extract_meta_regex(text: str) -> Dict[str, Any]:
         hh, mm, ap = ms.group(1), ms.group(2), ms.group(3).upper()
         out["event_start_time"] = f"{hh}{(':' + mm) if mm else ''}{ap}"
 
+    # end time (sometimes "approximately")
     me = re.search(
         r"(?:event\s+end(?:\s+time)?\s*(?:is)?\s*(?:approximately)?\s*)(\d{1,2})(?::(\d{2}))?\s*(am|pm)",
         text,
@@ -229,10 +428,9 @@ def extract_meta_regex(text: str) -> Dict[str, Any]:
         hh, mm, ap = me.group(1), me.group(2), me.group(3).upper()
         out["event_end_time"] = f"{hh}{(':' + mm) if mm else ''}{ap}"
 
-    if out["event_start_time"]:
-        out["event_start_time"] = out["event_start_time"].replace(" ", "")
-    if out["event_end_time"]:
-        out["event_end_time"] = out["event_end_time"].replace(" ", "")
+    # normalize times into consistent display
+    out["event_start_time"] = normalize_time(out.get("event_start_time"))
+    out["event_end_time"] = normalize_time(out.get("event_end_time"))
 
     return out
 
@@ -246,6 +444,7 @@ def build_fill_prompt(en_text: str, current: Dict[str, Any]) -> str:
 Fill ONLY the missing fields for this JSON. Do not change existing values.
 Return ONLY one JSON object with the same keys as the schema.
 If still not present, keep null.
+Do NOT use markdown formatting (no **bold**, no bullets). Return plain text values only.
 
 Schema keys:
 {list(SCHEMA.keys())}
@@ -265,6 +464,9 @@ Return JSON only.
 # =============================================================================
 
 class MetadataExtractor(BaseLLM):
+    """
+    Regex-first metadata extractor with optional LLM backfill.
+    """
 
     def __init__(self, base: Optional[BaseLLM] = None, device: Optional[str] = None):
         if base is not None:
@@ -279,11 +481,14 @@ class MetadataExtractor(BaseLLM):
         win = pick_relevant_window(english_text, window=window)
         base = extract_meta_regex(win)
 
-        if use_llm and any(v is None for v in base.values()):
+        if use_llm and any(base.get(k) is None for k in SCHEMA.keys()):
             try:
                 base = self._llm_fill_missing(win, base)
             except Exception:
                 log.exception("LLM backfill failed; returning regex-only metadata.")
+
+        # Always sanitize final output (fixes panchayat/block/location noise)
+        base = postprocess_metadata(base)
         return base
 
     def _llm_fill_missing(self, en_text: str, current: Dict[str, Any]) -> Dict[str, Any]:
@@ -291,25 +496,11 @@ class MetadataExtractor(BaseLLM):
         messages = [{"role": "user", "content": prompt}]
 
         raw = self._run_inference(messages, max_new_tokens=450)
-
-        # safe parse; if parse fails, keep current
         obj = self._safe_json(raw, fallback={})
 
         merged = dict(current)
         for k in SCHEMA.keys():
             if merged.get(k) is None and obj.get(k) is not None:
                 merged[k] = obj.get(k)
+
         return merged
-
-# # =========================== Useage =====================================
-# from pipeline.extraction.narration import NarrationGenerator
-# from pipeline.extraction.metadata import MetadataExtractor
-
-# base = NarrationGenerator()               # loads Ministral once
-# meta_extractor = MetadataExtractor(base=base)
-
-# meta = meta_extractor.extract(english_text, use_llm=True)
-
-# #==================Or======================================================
-# from pipeline.extraction.metadata import MetadataExtractor
-# meta = MetadataExtractor().extract(english_text, use_llm=True)

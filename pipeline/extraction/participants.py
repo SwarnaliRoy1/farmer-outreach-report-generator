@@ -59,7 +59,8 @@ def clean_name(name: Optional[str]) -> Optional[str]:
     if not name:
         return None
     s = re.sub(r"\s+", " ", str(name)).strip()
-    s = re.sub(r"\s+(Phone|Phone Number|Number|No\.?|Contact)\b.*$", "", s, flags=re.I).strip()
+    s = re.sub(r"\s+(Farmer|Phone|Phone Number|Number|No\.?|Contact)\b.*$", "", s, flags=re.I).strip()
+    s = re.sub(r"^\s*farmer\s+", "", name, flags=re.I).strip()
     s = re.sub(r"[,\.;:\-]+$", "", s).strip()
     return s if s else None
 
@@ -309,7 +310,7 @@ def _extract_anchor_spans(text: str) -> List[Dict[str, Any]]:
     t = re.sub(r"\b(?:\d\s+){9,12}\d\b", lambda m: re.sub(r"\s+", "", m.group(0)), t)
 
     name_re = r"([A-Za-z]+(?:\s+[A-Za-z]+){1,2})"
-    phone_label = r"(?:phone|ph|mobile|contact)(?:\s*(?:no|number))?"
+    phone_label = r"(?:phone|ph|mobile|contact|number)(?:\s*(?:no|number))?"
     pat = re.compile(
         rf"{name_re}\s*,?\s*{phone_label}\s*(?:is|:)?\s*([A-Za-z0-9\s]{{1,30}})",
         flags=re.I
