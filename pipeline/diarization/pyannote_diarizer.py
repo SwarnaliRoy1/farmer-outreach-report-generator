@@ -32,10 +32,6 @@ def load_diarization_pipeline(device: str) -> Pipeline:
     )
     pipeline.to(torch.device(device))
 
-    # # Tuned parameters for better speaker distinction
-    # pipeline.embedding_exclude_overlap = True
-    # pipeline._pipelines["clustering"]._instantiated["Fa"] = 0.3
-
     return pipeline
 
 

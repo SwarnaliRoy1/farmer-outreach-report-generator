@@ -15,6 +15,8 @@ Language codes follow FLORES-200 / NLLB convention e.g.:
   "pan_Guru" (Punjabi), "hin_Deva" (Hindi), "tam_Taml" (Tamil)
 """
 
+import os
+
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 from IndicTransToolkit import IndicProcessor
@@ -29,16 +31,19 @@ MODEL_ID = "ai4bharat/indictrans2-indic-en-1B"
 class IndicTrans2Translator:
 
     def __init__(self, device: str = "cuda", model_id: str = MODEL_ID):
+        token = os.getenv("HF_TOKEN") 
         self.device = device
 
         print(f"Loading IndicTrans2 ({model_id}) on {device}...")
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_id, trust_remote_code=True
+            model_id, trust_remote_code=True,
+            token = token,
         )
         self.model = AutoModelForSeq2SeqLM.from_pretrained(
             model_id,
             trust_remote_code=True,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            token = token,
+            dtype=torch.float16 if device == "cuda" else torch.float32,
         ).to(device)
         self.model.eval()
 
