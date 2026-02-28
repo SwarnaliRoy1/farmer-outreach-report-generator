@@ -50,7 +50,7 @@ def build_transcript(
     asr_model,
     language: str,
     device: str,
-    min_duration: float = 0.1,
+    min_duration: float = 0.5,
 ) -> list[dict]:
     """
     For each diarization turn, extract the audio chunk, run ASR,

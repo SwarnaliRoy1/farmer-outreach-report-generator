@@ -8,7 +8,7 @@ Single entry point for the full outreach report pipeline:
       → speaker diarization    [pipeline/diarization/pyannote_diarizer.py]
       → ASR transcription      [pipeline/asr/indic_conformer.py]
       → structured transcript  [pipeline/transcript/builder.py]
-      → translation            [pipeline/translation/indictrans2.py]
+      → translation            [pipeline/translation/sarvam_translate.py]
       → extraction & insights  [pipeline/extraction/*]
       → assemble & save        [pipeline/report/assembler.py]
 
@@ -108,10 +108,10 @@ def run_translation(
     flores_lang: str,
     device:      str,
 ) -> list[dict]:
-    from pipeline.translation.indictrans2 import IndicTrans2Translator
+    from pipeline.translation.sarvam_translate import SarvamTranslator
 
     log.info("── STAGE 4: Translation (Indic → English) ──")
-    translator = IndicTrans2Translator(device=device)
+    translator = SarvamTranslator(device=device)
     translator.translate_transcript(entries, src_lang=flores_lang)
 
     del translator
@@ -121,7 +121,7 @@ def run_translation(
     return entries
 
 
-async def run_extraction(entries: list[dict]) -> dict:
+async def run_extraction(entries: list[dict], flores_lang: str) -> dict:
     from pipeline.extraction.base_llm import BaseLLM
     from pipeline.extraction.insights import FarmerInsightExtractor
     # from pipeline.extraction.narration import NarrationGenerator, SummaryGenerator
@@ -155,7 +155,7 @@ async def run_extraction(entries: list[dict]) -> dict:
     # for ext in (insight_extractor, participant_extractor, summary_gen):
     #     _share_model(terminology_extractor, ext)
 
-    terminology_task = asyncio.ensure_future(terminology_extractor.extract(entries))
+    terminology_task = asyncio.ensure_future(terminology_extractor.extract(entries, flores_lang=flores_lang))
     narration        = narration_gen.generate(entries, max_chars=20000)
     insights         = await insight_extractor.extract(entries)
     participants     = await participant_extractor.extract(entries)
@@ -243,7 +243,7 @@ async def pipeline(args):
         log.info(f"Translated transcript: {trans_transcript_path}")
 
     # ── Stage 5: Extraction ──────────────────────────────────────────────────
-    extracted = await run_extraction(entries)
+    extracted = await run_extraction(entries, flores_lang=flores_lang)
 
     # ── Stage 6: Assemble + save report ─────────────────────────────────────
     log.info("── STAGE 6: Assembling report ──")
