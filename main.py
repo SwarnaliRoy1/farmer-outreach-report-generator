@@ -124,7 +124,10 @@ def run_translation(
 async def run_extraction(entries: list[dict], flores_lang: str) -> dict:
     from pipeline.extraction.base_llm import BaseLLM
     from pipeline.extraction.insights import FarmerInsightExtractor
-    from pipeline.extraction.narration import NarrationGenerator, SummaryGenerator
+    # from pipeline.extraction.narration import NarrationGenerator, SummaryGenerator
+    from pipeline.extraction.narration import NarrationGenerator
+    from pipeline.extraction.conclusion import ConclusionGenerator
+    from pipeline.extraction.metadata import MetadataExtractor
     from pipeline.extraction.participants import ParticipantExtractor
     from pipeline.extraction.terminology import TerminologyExtractor
 
@@ -142,26 +145,41 @@ async def run_extraction(entries: list[dict], flores_lang: str) -> dict:
 
     insight_extractor     = FarmerInsightExtractor.__new__(FarmerInsightExtractor)
     participant_extractor = ParticipantExtractor.__new__(ParticipantExtractor)
-    summary_gen           = SummaryGenerator.__new__(SummaryGenerator)
-
-    for ext in (insight_extractor, participant_extractor, summary_gen):
+    # summary_gen           = SummaryGenerator.__new__(SummaryGenerator)
+    conclusion_gen        = ConclusionGenerator.__new__(ConclusionGenerator)
+    metadata_extractor    = MetadataExtractor.__new__(MetadataExtractor)
+    
+    for ext in (insight_extractor, participant_extractor, conclusion_gen, metadata_extractor):
         _share_model(terminology_extractor, ext)
+    
+    # for ext in (insight_extractor, participant_extractor, summary_gen):
+    #     _share_model(terminology_extractor, ext)
 
     terminology_task = asyncio.ensure_future(terminology_extractor.extract(entries, flores_lang=flores_lang))
     narration        = narration_gen.generate(entries, max_chars=20000)
     insights         = await insight_extractor.extract(entries)
     participants     = await participant_extractor.extract(entries)
     terminology      = await terminology_task
+    # metadata from the narration text (English)
+    metadata = metadata_extractor.extract(narration["narration"], use_llm=True)
 
-    final_summary = await summary_gen.generate(
-        participants = participants,
-        challenges   = insights.get("challenges", []),
-        questions    = insights.get("farmer_questions", []),
-        narration    = narration["narration"],
+    # final_summary = await summary_gen.generate(
+    #     participants = participants,
+    #     challenges   = insights.get("challenges", []),
+    #     questions    = insights.get("farmer_questions", []),
+    #     narration    = narration["narration"],
+    # )
+    final_conclusion = await conclusion_gen.generate(
+    participants = participants,
+    challenges   = insights.get("challenges", []),
+    questions    = insights.get("farmer_questions", []),
+    narration    = narration["narration"],
     )
 
     return {
-        "summary":      final_summary,
+        # "summary":      final_summary,
+        "conclusion":   final_conclusion,
+        "metadata":     metadata,
         "narration":    narration,
         "terminology":  terminology,
         "insights":     insights,
@@ -230,7 +248,9 @@ async def pipeline(args):
     # ── Stage 6: Assemble + save report ─────────────────────────────────────
     log.info("── STAGE 6: Assembling report ──")
     report = assemble(
-        summary      = extracted["summary"],
+        # summary      = extracted["summary"],
+        conclusion   = extracted["conclusion"],
+        metadata     = extracted["metadata"],
         narration    = extracted["narration"],
         terminology  = extracted["terminology"],
         insights     = extracted["insights"],
@@ -244,6 +264,8 @@ async def pipeline(args):
     log.info(f"  Terminology terms  : {len(extracted['terminology'])}")
     log.info(f"  Farmer questions   : {len(extracted['insights'].get('farmer_questions', []))}")
     log.info(f"  Participants       : {extracted['participants'].get('total_count', 0)}")
+    log.info(f"  Metadata fields    : {sum(1 for v in extracted['metadata'].values() if v is not None)} / {len(extracted['metadata'])}")
+    log.info(f"  Conclusion chars   : {len(extracted['conclusion']) if extracted.get('conclusion') else 0}")
     log.info(f"  Outputs saved to   : {args.output_dir}")
     if export_pdf:
         log.info(f"  PDF report         : {args.output_dir}/outreach_report.pdf")
