@@ -158,22 +158,22 @@ def participants_to_df(participants: Any) -> pd.DataFrame:
     return df
 
 
-def flatten_challenges(challenges: List[Dict]) -> List[str]:
-    """
-    Convert [{"category": "...", "challenges": [...]}, ...]
-    into a flat list of "Category: challenge" strings for bullet rendering.
-    """
-    out = []
-    for group in coerce_list(challenges):
-        if not isinstance(group, dict):
-            out.append(str(group))
-            continue
-        cat   = safe(group.get("category", ""))
-        items = coerce_list(group.get("challenges", []))
-        for item in items:
-            prefix = f"{cat}: " if cat else ""
-            out.append(f"{prefix}{safe(item)}")
-    return out
+# def flatten_challenges(challenges: List[Dict]) -> List[str]:
+#     """
+#     Convert [{"category": "...", "challenges": [...]}, ...]
+#     into a flat list of "Category: challenge" strings for bullet rendering.
+#     """
+#     out = []
+#     for group in coerce_list(challenges):
+#         if not isinstance(group, dict):
+#             out.append(str(group))
+#             continue
+#         cat   = safe(group.get("category", ""))
+#         items = coerce_list(group.get("challenges", []))
+#         for item in items:
+#             prefix = f"{cat}: " if cat else ""
+#             out.append(f"{prefix}{safe(item)}")
+#     return out
 
 
 # =============================================================================
@@ -416,8 +416,11 @@ class PDFReportGenerator:
                 or narration_block.get("summary", "")
             )
 
-        # challenges → flatten category groups into bullet strings
-        key_challenges = flatten_challenges(data.get("challenges", []))
+        # # challenges → flatten category groups into bullet strings
+        # key_challenges = flatten_challenges(data.get("challenges", []))
+
+        # challenges → keep grouped by category for table rendering
+        key_challenges_groups = coerce_list(data.get("challenges", []))
 
         # farmer_questions → list of strings
         questions = coerce_list(data.get("farmer_questions", []))
@@ -452,9 +455,35 @@ class PDFReportGenerator:
             Spacer(1, 0.2 * inch),
         ]
 
-        # ── Metadata table ───────────────────────────────────────────────────
+        # ── Metadata table ──────────────────────────────────────────────────
+        #   - columns sized to fit the usable page width
+        #   - Paragraph cells so text wraps (no overflow)
+        #   - splitByRow so the table can break across pages cleanly
+        key_style = ParagraphStyle(
+            "MetaKey",
+            parent=styles["BodyText"],
+            fontName=self.header_font,
+            fontSize=9,
+            leading=11,
+            alignment=TA_LEFT,
+            spaceBefore=0,
+            spaceAfter=0,
+        )
+        val_style = ParagraphStyle(
+            "MetaVal",
+            parent=styles["BodyText"],
+            fontName=self.font,
+            fontSize=9,
+            leading=11,
+            alignment=TA_LEFT,
+            spaceBefore=0,
+            spaceAfter=0,
+        )
 
-        table_data = [
+        def _p(s: Any, style: ParagraphStyle) -> Paragraph:
+            return Paragraph(_escape_for_para(safe(s)), style)
+
+        meta_rows = [
             ["Date",                         safe(meta.get("date", "")),
              "Day",                          safe(meta.get("day", ""))],
             ["Village",                      extract_parenthetical(meta.get("village")),
@@ -473,23 +502,73 @@ class PDFReportGenerator:
              "Event End Time",               normalize_time(safe(meta.get("event_end_time", "")))],
         ]
 
-        meta_tbl = Table(
+        table_data = []
+        for r in meta_rows:
+            table_data.append([
+                _p(r[0], key_style), _p(r[1], val_style),
+                _p(r[2], key_style), _p(r[3], val_style),
+            ])
+
+        usable_width = A4[0] - doc.leftMargin - doc.rightMargin
+        # value columns narrower than key columns
+        weights = [1.4, 1.2, 1.4, 1.2]
+        col_widths = [usable_width * (w / sum(weights)) for w in weights]
+
+        meta_tbl = LongTable(
             table_data,
-            colWidths=[2.0 * inch, 1.8 * inch, 1.8 * inch, 2.0 * inch],
-            style=TableStyle([
-                ("GRID",       (0, 0), (-1, -1), 0.5, colors.black),
-                ("FONTNAME",   (0, 0), (-1, -1), self.font),
-                ("FONTSIZE",   (0, 0), (-1, -1), 9),
-                ("BACKGROUND", (0, 0), (0, -1),  colors.whitesmoke),
-                ("BACKGROUND", (2, 0), (2, -1),  colors.whitesmoke),
-                ("FONTNAME",   (0, 0), (0, -1),  self.header_font),
-                ("FONTNAME",   (2, 0), (2, -1),  self.header_font),
-                ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
-                ("PADDING",    (0, 0), (-1, -1), 4),
-            ]),
+            colWidths=col_widths,
+            splitByRow=1,
         )
+        meta_tbl.setStyle(TableStyle([
+            ("GRID",          (0, 0), (-1, -1), 0.5, colors.black),
+            ("BOX",           (0, 0), (-1, -1), 0.8, colors.black),
+            ("BACKGROUND",    (0, 0), (0, -1), colors.whitesmoke),
+            ("BACKGROUND",    (2, 0), (2, -1), colors.whitesmoke),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 4),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
         story.append(meta_tbl)
         story.append(Spacer(1, 0.2 * inch))
+
+        # table_data = [
+        #     ["Date",                         safe(meta.get("date", "")),
+        #      "Day",                          safe(meta.get("day", ""))],
+        #     ["Village",                      extract_parenthetical(meta.get("village")),
+        #      "Name of the Sarpanch",         extract_parenthetical(meta.get("sarpanch_name"))],
+        #     ["Panchayat",                    extract_parenthetical(meta.get("panchayat")),
+        #      "Phone Number",                 safe(meta.get("phone_number", ""))],
+        #     ["Block",                        extract_parenthetical(meta.get("block")),
+        #      "Event Location",               extract_parenthetical(meta.get("event_location"))],
+        #     ["District",                     extract_parenthetical(meta.get("district")),
+        #      "No of Farmers attended",       total],
+        #     ["Name of the Coordinator",      extract_parenthetical(meta.get("coordinator_name")),
+        #      "Female Farmers",               female],
+        #     ["Name of the Reporting Manager",extract_parenthetical(meta.get("reporting_manager_name")),
+        #      "Male Farmers",                 male],
+        #     ["Event Start Time",             normalize_time(safe(meta.get("event_start_time", ""))),
+        #      "Event End Time",               normalize_time(safe(meta.get("event_end_time", "")))],
+        # ]
+
+        # meta_tbl = Table(
+        #     table_data,
+        #     colWidths=[2.1 * inch, 1.6 * inch, 2.1 * inch, 1.6 * inch],
+        #     style=TableStyle([
+        #         ("GRID",       (0, 0), (-1, -1), 0.5, colors.black),
+        #         ("FONTNAME",   (0, 0), (-1, -1), self.font),
+        #         ("FONTSIZE",   (0, 0), (-1, -1), 9),
+        #         ("BACKGROUND", (0, 0), (0, -1),  colors.whitesmoke),
+        #         ("BACKGROUND", (2, 0), (2, -1),  colors.whitesmoke),
+        #         ("FONTNAME",   (0, 0), (0, -1),  self.header_font),
+        #         ("FONTNAME",   (2, 0), (2, -1),  self.header_font),
+        #         ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+        #         ("PADDING",    (0, 0), (-1, -1), 4),
+        #     ]),
+        # )
+        # story.append(meta_tbl)
+        # story.append(Spacer(1, 0.2 * inch))
 
         # ── Detailed Narration ───────────────────────────────────────────────
 
@@ -497,7 +576,7 @@ class PDFReportGenerator:
         narration_content = []
         if narration_text:
             narration_content.append(
-                Paragraph("<b>Translation / Dictation:</b>", body_style)
+                Paragraph("<b>Translation / Dictation:</b>", styles["Heading4"])
             )
             narration_html = _escape_for_para(
                 strip_markdown(narration_text)
@@ -509,7 +588,7 @@ class PDFReportGenerator:
             )
         if summary_text:
             narration_content.append(Spacer(1, 8))
-            narration_content.append(Paragraph("<b>Summary:</b>", body_style))
+            narration_content.append(Paragraph("<b>Summary:</b>", styles["Heading4"]))
             narration_content.append(
                 Paragraph(_escape_for_para(strip_markdown(summary_text)), body_style)
             )
@@ -518,15 +597,103 @@ class PDFReportGenerator:
 
         # ── Key Challenges ───────────────────────────────────────────────────
 
+        # story.append(self._boxed_header("Key Challenges Shared by the farmers:"))
+        # story.append(
+        #     self._boxed_body_splittable(self._make_bullets(key_challenges, body_style))
+        # )
+        # story.append(Spacer(1, 0.2 * inch))
+        # ── Key Challenges ───────────────────────────────────────────────────
+        
         story.append(self._boxed_header("Key Challenges Shared by the farmers:"))
-        story.append(
-            self._boxed_body_splittable(self._make_bullets(key_challenges, body_style))
-        )
+        
+        # Render as a 2-column table: Category | Challenges (wrapped, page-fit width)
+        groups = [g for g in key_challenges_groups if isinstance(g, dict)]
+        if groups:
+            cat_style = ParagraphStyle(
+                "ChCat",
+                parent=styles["BodyText"],
+                fontName=self.header_font,
+                fontSize=9,
+                leading=11,
+                alignment=TA_LEFT,
+                spaceBefore=0,
+                spaceAfter=0,
+            )
+            chal_style = ParagraphStyle(
+                "ChTxt",
+                parent=styles["BodyText"],
+                fontName=self.font,
+                fontSize=9,
+                leading=11,
+                alignment=TA_LEFT,
+                spaceBefore=0,
+                spaceAfter=0,
+            )
+        
+            def _p(s: Any, style: ParagraphStyle) -> Paragraph:
+                return Paragraph(_escape_for_para(safe(s)), style)
+        
+            def _bullets(items: Any) -> str:
+                items = coerce_list(items)
+                cleaned = [safe(x) for x in items if safe(x)]
+                if not cleaned:
+                    return ""
+                # HTML bullets so they wrap inside a Paragraph
+                return "<br/>".join([f"&bull; { _escape_for_para(c) }" for c in cleaned])
+        
+            table_data = [[
+                Paragraph(_escape_for_para("Category"), styles["BodyText"]),
+                Paragraph(_escape_for_para("Challenges"), styles["BodyText"]),
+            ]]
+        
+            for g in groups:
+                category = safe(g.get("category", ""))
+                challenges_html = _bullets(g.get("challenges", []))
+                table_data.append([
+                    _p(category, cat_style),
+                    Paragraph(challenges_html or _escape_for_para(""), chal_style),
+                ])
+        
+            usable_width = A4[0] - doc.leftMargin - doc.rightMargin
+            weights = [1.0, 3.0]
+            col_widths = [usable_width * (w / sum(weights)) for w in weights]
+        
+            chal_tbl = LongTable(
+                table_data,
+                colWidths=col_widths,
+                repeatRows=1,
+                splitByRow=1,
+            )
+        
+            # Alternate background by category row (row 1..n; row 0 is header)
+            bg_x = colors.HexColor("#F7F7F7")
+            bg_y = colors.HexColor("#EFEFEF")
+            bg_cmds = []
+            for i in range(1, len(table_data)):
+                bg = bg_x if (i % 2 == 1) else bg_y
+                bg_cmds.append(("BACKGROUND", (0, i), (-1, i), bg))
+        
+            chal_tbl.setStyle(TableStyle([
+                ("GRID",          (0, 0), (-1, -1), 0.5, colors.black),
+                ("BOX",           (0, 0), (-1, -1), 0.8, colors.black),
+                ("BACKGROUND",    (0, 0), (-1, 0), colors.lightgrey),
+                ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING",   (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING",  (0, 0), (-1, -1), 4),
+                ("TOPPADDING",    (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ] + bg_cmds))
+        
+            story.append(chal_tbl)
+        else:
+            # Fallback: if input is already a list of strings
+            story.append(self._boxed_body_splittable(self._make_bullets(key_challenges_groups, body_style)))
+        
         story.append(Spacer(1, 0.2 * inch))
 
         # ── Farmer Questions ─────────────────────────────────────────────────
-
-        story.append(self._boxed_header("Questions asked by farmers:"))
+        usable_width = A4[0] - doc.leftMargin - doc.rightMargin
+        story.append(self._boxed_header("Questions asked by farmers:", width=usable_width))
         structured_q = [q for q in questions if isinstance(q, dict)]
 
         if structured_q:
@@ -543,9 +710,30 @@ class PDFReportGenerator:
             ))
         else:
             story.append(
-                self._boxed_body_splittable(self._make_bullets(questions, body_style))
+                self._boxed_body_splittable(self._make_bullets(questions, body_style), width=usable_width)
             )
         story.append(Spacer(1, 0.2 * inch))
+
+        # story.append(self._boxed_header("Questions asked by farmers:"))
+        # structured_q = [q for q in questions if isinstance(q, dict)]
+
+        # if structured_q:
+        #     common_cols = ["question", "asked_by", "crop", "timestamp", "notes"]
+        #     cols = [
+        #         c for c in common_cols
+        #         if any(c in r and r.get(c) not in (None, "", "None") for r in structured_q)
+        #     ] or sorted({k for r in structured_q for k in r.keys()})[:6]
+
+        #     story.append(self._table_from_rows(
+        #         structured_q, cols, doc, styles,
+        #         header_title_map={"question": "Question", "asked_by": "Asked By",
+        #                           "timestamp": "Time"},
+        #     ))
+        # else:
+        #     story.append(
+        #         self._boxed_body_splittable(self._make_bullets(questions, body_style))
+        #     )
+        # story.append(Spacer(1, 0.2 * inch))
 
         # ── Terminology Mapping ──────────────────────────────────────────────
         # Our schema keys: Crop, Local Name, Standard Name, Scientific Name, Language
@@ -578,7 +766,7 @@ class PDFReportGenerator:
 
         # ── Participants Table ───────────────────────────────────────────────
 
-        story.append(Paragraph("Participants Details", styles["Heading2"]))
+        story.append(Paragraph("Participants Details (Farmers)", styles["Heading2"]))
         story.append(Spacer(1, 6))
 
         wanted_cols  = ["name", "phone_number", "total_land_acres", "qualification", "animals", "main_crops", "notes"]
@@ -647,50 +835,6 @@ class PDFReportGenerator:
                 "notes":            120,
             }
         
-        # wanted_cols  = ["name", "role", "village", "phone_number"]
-        # present_cols = [c for c in wanted_cols if c in participants_df.columns]
-
-        # if participants_df.empty or not present_cols:
-        #     story.append(Paragraph("No participant details available.", body_style))
-        # else:
-        #     cell_style = ParagraphStyle(
-        #         "CellP",
-        #         parent=styles["BodyText"],
-        #         fontName=self.font,
-        #         fontSize=10,
-        #         leading=12,
-        #         alignment=TA_LEFT,
-        #         spaceBefore=0,
-        #         spaceAfter=0,
-        #     )
-        #     hdr_style = ParagraphStyle(
-        #         "HeaderCellP",
-        #         parent=cell_style,
-        #         fontName=self.header_font,
-        #     )
-
-        #     p_data = [
-        #         [Paragraph(_escape_for_para(c), hdr_style) for c in present_cols]
-        #     ]
-        #     for _, row in participants_df[present_cols].iterrows():
-        #         p_data.append([
-        #             Paragraph(
-        #                 _escape_for_para(
-        #                     "" if pd.isna(row[c]) else
-        #                     ("" if str(row[c]).lower() == "none" else
-        #                      str(row[c]).replace("\n", " ").strip())
-        #                 ),
-        #                 cell_style,
-        #             )
-        #             for c in present_cols
-        #         ])
-
-        #     col_widths_map = {
-        #         "name":         120,
-        #         "role":         100,
-        #         "village":       90,
-        #         "phone_number":  80,
-        #     }
             usable_width = A4[0] - doc.leftMargin - doc.rightMargin
             widths       = [col_widths_map.get(c, 80) for c in present_cols]
             total_w      = sum(widths)
