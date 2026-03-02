@@ -60,13 +60,22 @@ def clean_name(name: Optional[str]) -> Optional[str]:
         return None
     s = re.sub(r"\s+", " ", str(name)).strip()
     s = re.sub(r"\s+(Farmer|Phone|Phone Number|Number|No\.?|Contact)\b.*$", "", s, flags=re.I).strip()
+    # Remove trailing labels even if glued to digits/punct, e.g. "Singh Phone94649", "Singh Phone: 946.."
+    s = re.sub(
+        r"\s*(?:farmer|phone(?:\s*number)?|mobile(?:\s*number)?|contact|number|no\.?)"
+        r"(?:\b|(?=\d)|(?=[:\-]))"
+        r".*$",
+        "",
+        s,
+        flags=re.I
+    ).strip()
     s = re.sub(r"^\s*farmer\s+", "", name, flags=re.I).strip()
     s = re.sub(r"[,\.;:\-]+$", "", s).strip()
     return s if s else None
 
 BAD_NAME_PHRASES = {
     "names and", "name and", "farmers names", "farmers name", "phone numbers",
-    "phone number", "numbers are", "are listed", "names are", "farmers' names",
+    "phone number", "phone", "numbers are", "are listed", "names are", "farmers' names",
     "farmers’ names", "farmers", "farmer", "total farmers", "male farmers", "female farmers",
     "meeting schedule", "event start", "event end", "day monday", "day tuesday",
 }
@@ -158,14 +167,22 @@ def extract_phone(block: str) -> Optional[str]:
     bl = b.lower()
 
     # A) explicit phone cue, digits/spaced digits nearby
-    m = re.search(r"\b(?:phone|ph|mobile|contact)\b(?:\s*(?:no|number))?\s*(?:is|:)?\s*([0-9][0-9\s]{7,})", bl)
+    # m = re.search(r"\b(?:phone|ph|mobile|contact)\b(?:\s*(?:no|number))?\s*(?:is|:)?\s*([0-9][0-9\s]{7,})", bl)
+    m = re.search(
+        r"(?:\b(?:phone|ph|mobile|contact)(?:\s*(?:no|number))?)(?:\b|(?=\d)|(?=[:\-]))\s*(?:is|:|-)?\s*([0-9][0-9\s]{7,})",
+        bl
+    )
     if m:
         digits = re.sub(r"\D", "", m.group(1))
         if len(digits) >= 10:
             return digits[-10:]
 
     # B) explicit phone cue, spoken digits window
-    m2 = re.search(r"\b(?:phone|ph|mobile|contact)\b(?:\s*(?:no|number))?\s*(?:is|:)?\s*(.{0,80})", bl)
+    # m2 = re.search(r"\b(?:phone|ph|mobile|contact)\b(?:\s*(?:no|number))?\s*(?:is|:)?\s*(.{0,80})", bl)
+    m2 = re.search(
+        r"(?:\b(?:phone|ph|mobile|contact)(?:\s*(?:no|number))?)(?:\b|(?=\d)|(?=[:\-]))\s*(?:is|:|-)?\s*(.{0,80})",
+        bl
+    )
     if m2:
         digits = spoken_to_digits(m2.group(1))
         if len(digits) >= 10:
@@ -261,10 +278,15 @@ def extract_name(block: str) -> Optional[str]:
         return clean_name(m.group(1))
 
     # "X Singh, phone number ..."
-    m2 = re.search(r"\b([A-Za-z]+(?:\s+[A-Za-z]+){1,2})\s*,?\s*(?:phone|ph|mobile|contact)\b", b, re.I)
-    if m2:
-        return clean_name(m2.group(1))
-
+    # m2 = re.search(r"\b([A-Za-z]+(?:\s+[A-Za-z]+){1,2})\s*,?\s*(?:phone|ph|mobile|contact)\b", b, re.I)
+    # if m2:
+    #     return clean_name(m2.group(1))
+    m2 = re.search(
+        r"\b([A-Za-z]+(?:\s+[A-Za-z]+){1,2})\s*,?\s*(?:phone|ph|mobile|contact)(?:\b|(?=\d)|(?=[:\-]))",
+        b,
+        re.I
+    )
+    
     # "farmer, First Last"
     m3 = re.search(r"\bfarm(?:er)?\b\s*,?\s*([A-Za-z]+(?:\s+[A-Za-z]+){1,2})\b", b, re.I)
     if m3:
